@@ -1,6 +1,6 @@
 # VT Sokoban (DEC VT DRCS edition)
 
-![VT Sokoban](vtsokoban.png)
+![VT Sokoban](vtsokoban.jpg)
 
 A terminal Sokoban game for **DEC VT300-series (and later) terminals**, rendered
 with a downloadable soft font (DRCS) instead of ASCII/curses. Every map cell is
