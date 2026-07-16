@@ -1,9 +1,10 @@
 /* VT Sokoban -- DEC VT DRCS edition.
  *
- * The board is drawn with a downloadable soft font (DRCS): every map cell is
- * one 16x16 tile rendered as two adjacent soft-font characters.  No curses;
- * the terminal backend (vt_term.c) downloads the tiles once and diffs a cell
- * buffer to the screen.  See vt.h / soko_tiles.h.
+ * The whole screen is drawn with a downloadable soft font (DRCS): map cells are
+ * 16x16 tiles, and so are the title logo, the seven-segment counters and the
+ * key caps -- each is a run of soft-font characters.  Only the plain labels are
+ * the terminal's own font.  No curses; the backend (vt_term.c) downloads the
+ * font once and diffs a cell buffer to the screen.  See vt.h / soko_tiles.h.
  */
 
 #include <stdio.h>
@@ -23,7 +24,6 @@ typedef struct {
     int player_y;
     int boxes_total;
     int boxes_on_goal;
-    char* level_name;
 } Game;
 
 int current_level = 0;
@@ -113,39 +113,108 @@ static void free_map(char** map, int height)
     free(map);
 }
 
-/* Draw the whole board + status into the cell buffer and present it.  The
+#define URL "github.com/tenox7/vtsokoban"
+#define MOVES "MOVE: ARROWS / WASD / HJKL"
+#define MAXPIPS 10          /* past this the pip row is wider than it is useful */
+
+static const struct { char key; const char* label; } Keys[] = {
+    { 'R', "RESTART" }, { 'N', "NEXT" }, { 'P', "PREV" },
+    { 'C', "REDRAW" }, { 'Q', "QUIT" }
+};
+#define NKEYS (int)(sizeof Keys / sizeof Keys[0])
+
+/* Everything under the board is centred on the screen, not on the board, so
+ * the panel holds still while levels change width. */
+static int centre(int w)
+{
+    int x = (ScrW - w) / 2;
+    return x < 0 ? 0 : x;
+}
+
+static int pips_of(const Game* game)
+{
+    return game->boxes_total <= MAXPIPS ? game->boxes_total : 0;
+}
+
+/* LEVEL 01/24    BOXES 0/4 (o)(o)[x][x]  -- labels are engraved plates, the
+ * counts are seven-segment glyphs, and each box is a goal ring that becomes a
+ * crate as you fill it. */
+static void draw_status(const Game* game, int row)
+{
+    char lv[16], bx[16];
+    int i, x, np = pips_of(game);
+
+    snprintf(lv, sizeof lv, "%02d/%02d", current_level + 1, num_levels);
+    snprintf(bx, sizeof bx, "%d/%d", game->boxes_on_goal, game->boxes_total);
+
+    x = centre(7 + (int)strlen(lv) * 2 + 4 + 7 + (int)strlen(bx) * 2
+               + (np ? 1 + np * 2 : 0));
+    vt_puts(row, x, " LEVEL ", VA_REV);
+    x += 7;
+    x += vt_num(row, x, lv, 0);
+    x += 4;
+    vt_puts(row, x, " BOXES ", VA_REV);
+    x += 7;
+    x += vt_num(row, x, bx, 0);
+    if (!np) return;
+    x += 1;
+    for (i = 0; i < np; i++)
+        vt_tile(row, x + i * 2,
+                i < game->boxes_on_goal ? TILE_BOX_ON_GOAL : TILE_GOAL, 0);
+}
+
+static void draw_keys(int row)
+{
+    int i, w = 0, x;
+
+    for (i = 0; i < NKEYS; i++) w += (i ? 2 : 0) + 3 + (int)strlen(Keys[i].label);
+    x = centre(w);
+    for (i = 0; i < NKEYS; i++) {
+        if (i) x += 2;
+        x += vt_keycap(row, x, Keys[i].key, 0) + 1;
+        vt_puts(row, x, Keys[i].label, 0);
+        x += (int)strlen(Keys[i].label);
+    }
+}
+
+/* A plate with the N key set into it: reverse video knocks the cap out dark,
+ * so it reads as engraved rather than as a second, brighter thing. */
+static void draw_done(int row)
+{
+    const char* a = " LEVEL COMPLETE -- PRESS ";
+    const char* b = " FOR THE NEXT ONE ";
+    int x = centre((int)strlen(a) + 2 + (int)strlen(b));
+
+    vt_puts(row, x, a, VA_REV);
+    x += (int)strlen(a);
+    x += vt_keycap(row, x, 'N', VA_REV);
+    vt_puts(row, x, b, VA_REV);
+}
+
+/* Draw the whole board + panel into the cell buffer and present it.  The
  * board is small, so a full redraw every frame is cheaper than tracking
  * dirty cells -- vt_present sends only the cells that actually changed. */
 static void draw_board(const Game* game, int complete)
 {
-    int y, x, sy, sx, bw = game->width * 2, bh = game->height;
-    char line[128];
+    int y, x, sy, row, bh = game->height;
 
     vt_clear();
 
-    sx = (ScrW - bw) / 2;
-    sy = (ScrH - bh - 6) / 2;
-    if (sx < 0) sx = 0;
-    if (sy < 1) sy = 1;
+    sy = (ScrH - (bh + 9)) / 2;
+    if (sy < 0) sy = 0;
 
     for (y = 0; y < bh; y++)
         for (x = 0; x < game->width; x++)
-            vt_tile(sy + y, sx + x * 2, tile_for(game->map[y][x]), 0);
+            vt_tile(sy + y, centre(game->width * 2) + x * 2,
+                    tile_for(game->map[y][x]), 0);
 
-    y = sy + bh + 1;
-    vt_puts(y, sx, "VT SOKOBAN - github.com/tenox7/vtsokoban", VA_BOLD);
-    snprintf(line, sizeof line, "Level: %s (%d/%d)",
-             game->level_name, current_level + 1, num_levels);
-    vt_puts(y + 1, sx, line, 0);
-    if (complete)
-        vt_puts(y + 2, sx, "Level complete! Press N for next level.", VA_BOLD | VA_REV);
-    else {
-        snprintf(line, sizeof line, "Boxes: %d/%d",
-                 game->boxes_on_goal, game->boxes_total);
-        vt_puts(y + 2, sx, line, 0);
-    }
-    vt_puts(y + 3, sx, "Arrows/WASD/hjkl move", 0);
-    vt_puts(y + 4, sx, "[R]estart [N]ext [P]rev [C]lear [Q]uit", 0);
+    row = sy + bh + 1;
+    vt_logo(row, centre(VT_LOGO_W), 0);
+    vt_puts(row + 2, centre((int)strlen(URL)), URL, 0);
+    draw_status(game, row + 4);
+    if (complete) draw_done(row + 5);
+    draw_keys(row + 6);
+    vt_puts(row + 7, centre((int)strlen(MOVES)), MOVES, 0);
 
     vt_present();
 }
@@ -194,7 +263,6 @@ static void load_into(Game* game, int level)
     game->map = load_level(level, &game->width, &game->height,
                            &game->player_x, &game->player_y, &game->boxes_total);
     game->boxes_on_goal = 0;
-    game->level_name = strdup(embedded_levels[level].name);
 }
 
 static void show_help(const char* prog)
@@ -247,7 +315,6 @@ int main(int argc, char *argv[])
         draw_board(&game, 0);
         vt_shot(shot_path);
         free_map(game.map, game.height);
-        free(game.level_name);
         return 0;
     }
 
@@ -273,14 +340,12 @@ int main(int argc, char *argv[])
             break;
         case 'r': case 'R':
             free_map(game.map, game.height);
-            free(game.level_name);
             load_into(&game, current_level);
             complete = 0;
             break;
         case 'n': case 'N':
             if (complete || current_level < num_levels - 1) {
                 free_map(game.map, game.height);
-                free(game.level_name);
                 current_level = complete
                     ? (current_level + 1) % num_levels : current_level + 1;
                 load_into(&game, current_level);
@@ -290,7 +355,6 @@ int main(int argc, char *argv[])
         case 'p': case 'P':
             if (current_level > 0) {
                 free_map(game.map, game.height);
-                free(game.level_name);
                 current_level--;
                 load_into(&game, current_level);
                 complete = 0;
@@ -311,6 +375,5 @@ int main(int argc, char *argv[])
 
     vt_close();
     free_map(game.map, game.height);
-    free(game.level_name);
     return 0;
 }

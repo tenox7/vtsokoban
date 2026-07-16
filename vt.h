@@ -1,13 +1,13 @@
 /* vt.h  --  shared declarations for the VT Sokoban DEC VT front end.
  *
  * Renders the board on DEC VT300-series (and later) terminals using a DRCS
- * soft font: one map tile = two adjacent soft-font characters, drawn by
- * writing raw escape sequences.  No curses anywhere; the backend (vt_term.c)
- * keeps a diffed cell buffer and sends only what changed.
+ * soft font, drawn by writing raw escape sequences.  No curses anywhere; the
+ * backend (vt_term.c) keeps a diffed cell buffer and sends only what changed.
  *
- * Unlike VT City this tile set is tiny (7 tiles / 13 unique 8x16 halves), so
- * every glyph is downloaded once at startup and stays resident -- no glyph
- * cache, no streaming.
+ * The soft font holds the whole game's art, not just the board: 8x16 cells
+ * that make up map tiles (2 cells), the title logo (2x2 per letter) and the
+ * counter digits and key caps (2x1).  It is small enough to download once at
+ * startup and leave resident -- no glyph cache, no streaming.
  */
 
 #ifndef VT_H
@@ -43,10 +43,15 @@ void vt_put(int y, int x, int ch, int cs, int attr);
 void vt_puts(int y, int x, const char *s, int attr);
 void vt_fill(int y, int x, int w, int h, int ch, int cs, int attr);
 void vt_frame(int y, int x, int w, int h, int attr);
-void vt_tile(int y, int x, int tile, int attr);	/* one map tile = 2 cells */
 void vt_present(void);			/* diff cur vs sent, emit, flush */
 void vt_repaint(void);			/* force a full repaint next present */
 void vt_shot(const char *path);		/* dump the cell buffer as ASCII */
+
+/* --- soft-font art (see soko_tiles.h for the cell tables) ------------------ */
+void vt_tile(int y, int x, int tile, int attr);	  /* map tile: 2 cells wide */
+void vt_logo(int y, int x, int attr);		  /* title: VT_LOGO_W x 2 */
+int  vt_num(int y, int x, const char *s, int attr);   /* "01/24": 2 cells/char */
+int  vt_keycap(int y, int x, int key, int attr);  /* one key cap: 2 cells */
 
 /* keys returned by vt_getkey (plus plain ASCII chars) */
 #define VK_NONE  (-1)

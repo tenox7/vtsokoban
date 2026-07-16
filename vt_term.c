@@ -5,14 +5,15 @@
  * diffed cell buffer so each frame sends only what changed -- playable over a
  * slow serial line.
  *
- * The soft font is tiny and static: at startup every unique 8x16 tile half is
- * downloaded once with DECDLD into a fixed DRCS slot and stays resident for
- * the whole session (7 tiles = 13 unique halves, far under the 94 slots).  So
- * there is no glyph cache and no streaming -- vt_tile resolves a tile straight
- * to its slot characters.
+ * The soft font is static: at startup every 8x16 art cell mktiles interned is
+ * downloaded once with DECDLD into DRCS slot n and stays resident for the whole
+ * session -- tiles, the logo, the counter digits and the key caps all together
+ * still fit the 94 slots.  So there is no glyph cache and no streaming: cell n
+ * simply *is* DRCS character 33+n.
  *
- * Glyph geometry: one 16x16 tile is two 8x16 half-tile characters, resampled
- * to the terminal's cell (VT420 10x16, VT340 10x20, VT320 15x12).
+ * Glyph geometry: every art cell is 8x16 source pixels resampled to the
+ * terminal's own cell (VT420 10x16, VT340 10x20, VT320 15x12), so a map tile is
+ * 2 cells, a logo letter 2x2, a digit or key cap 2x1.
  */
 
 #include <stdio.h>
@@ -51,9 +52,6 @@ static int TioSaved = 0;
 
 /* glyph geometry, chosen from the terminal model */
 static int GlyphW = 10, GlyphH = 16;
-
-/* half id -> DRCS slot, filled once by preload_font() */
-static short HalfSlot[VT_NHALF];
 
 /* ---- output buffering ------------------------------------------------------ */
 
@@ -288,18 +286,18 @@ on_winch(int sig)
 
 /* ---- glyph download --------------------------------------------------------- */
 
-/* One 8x16 half -> GlyphW x GlyphH pixels.  Period-2 dither rows/columns
+/* One 8x16 art cell -> GlyphW x GlyphH pixels.  Period-2 dither rows/columns
  * continue their pattern at the target size; structured art resamples
  * centered-nearest.  At 8x16 it is an exact copy.  (Identical to mktiles.) */
 static void
-half_glyph(int half, unsigned char g[32][16])
+cell_glyph(int cell, unsigned char g[32][16])
 {
   unsigned char s[16][8], hb[16][16];
-  int t = half / 2, sd = half % 2, x, y, per;
+  int x, y, per;
 
   for (y = 0; y < 16; y++)
     for (x = 0; x < 8; x++)
-      s[y][x] = (VtTileBits[t][y][sd] >> x) & 1;
+      s[y][x] = (VtCellBits[cell][y] >> x) & 1;
 
   for (y = 0; y < 16; y++) {		/* horizontal: 8 -> GlyphW */
     per = s[y][0] != s[y][1];
@@ -319,16 +317,16 @@ half_glyph(int half, unsigned char g[32][16])
   }
 }
 
-/* one-character DECDLD: define DRCS slot `slot` as tile half `half` */
+/* one-character DECDLD: define DRCS slot `cell` as art cell `cell` */
 static void
-load_glyph(int slot, int half)
+load_glyph(int cell)
 {
   unsigned char g[32][16];
   char hdr[48];
   int band, x, i;
 
-  half_glyph(half, g);
-  sprintf(hdr, "\033P0;%d;1;%d;0;2;%d;0{ @", slot + 1, GlyphW, GlyphH);
+  cell_glyph(cell, g);
+  sprintf(hdr, "\033P0;%d;1;%d;0;2;%d;0{ @", cell + 1, GlyphW, GlyphH);
   outs(hdr);
   for (band = 0; band < GlyphH; band += 6) {
     if (band) outc('/');
@@ -342,23 +340,16 @@ load_glyph(int slot, int half)
   outs("\033\\");
 }
 
-/* Download every unique tile half into a fixed slot, once, and remember the
- * slot for each half (aliases share their canonical half's slot). */
+/* Download the whole art font, once.  mktiles already interned duplicate cells
+ * and refuses to emit more than NSLOT of them, so this is a straight 1:1 load. */
 static void
 preload_font(void)
 {
-  int h, nslot = 0;
+  int c;
 
   outs("\033P0;0;2{ @\033\\");		/* erase any resident soft font */
   outs("\033) @");			/* G1 = DRCS " @" */
-  for (h = 0; h < VT_NHALF; h++) {
-    int a = VtHalfAlias[h];
-    if (a != h) { HalfSlot[h] = HalfSlot[a]; continue; }
-    if (nslot >= NSLOT) continue;	/* cannot happen for this tile set */
-    HalfSlot[h] = (short)nslot;
-    load_glyph(nslot, h);
-    nslot++;
-  }
+  for (c = 0; c < VT_NCELL && c < NSLOT; c++) load_glyph(c);
 }
 
 /* ---- terminal session ------------------------------------------------------- */
@@ -538,22 +529,81 @@ vt_frame(int y, int x, int w, int h, int attr)
   }
 }
 
-/* one map tile: two half-tile DRCS cells, resolved straight to slot chars */
+/* ---- soft-font art ---------------------------------------------------------
+ * Every art cell is DRCS character 33+cell, so drawing is just a run of cell
+ * ids into the buffer.  `prev` carries the ASCII stand-in for vt_shot. */
+
+static void
+put_cells(int y, int x, const short *cells, int n, const char *prev, int attr)
+{
+  int i;
+
+  for (i = 0; i < n; i++) {
+    VCell *c;
+    if (y < 0 || y >= ScrH || x + i < 0 || x + i >= ScrW) continue;
+    c = &Cur[y][x + i];
+    c->ch = (unsigned short)(33 + cells[i]);
+    c->cs = VT_CS_DRCS;
+    c->attr = (unsigned char)attr;
+    c->prev = prev[i];
+  }
+}
+
+/* one map tile = 2 cells */
 void
 vt_tile(int y, int x, int tile, int attr)
 {
-  int s;
-
   if (tile < 0 || tile >= VT_NALLTILE) tile = 0;
-  for (s = 0; s < 2; s++) {
-    VCell *c;
-    if (y < 0 || y >= ScrH || x + s < 0 || x + s >= ScrW) continue;
-    c = &Cur[y][x + s];
-    c->ch = (unsigned short)(33 + HalfSlot[VtHalfAlias[tile * 2 + s]]);
-    c->cs = VT_CS_DRCS;
-    c->attr = (unsigned char)attr;
-    c->prev = VtTilePrev[tile][s];
+  put_cells(y, x, VtTileCell[tile], 2, VtTilePrev[tile], attr);
+}
+
+/* the "VT SOKOBAN" title: VT_LOGO_W cells wide, 2 rows tall */
+void
+vt_logo(int y, int x, int attr)
+{
+  static const char *str = VT_LOGO_STR;
+  char prev[VT_LOGO_W];
+  int row, i;
+
+  for (row = 0; row < VT_LOGO_H; row++) {
+    for (i = 0; i < VT_LOGO_W; i++)	/* spell it out for the -shot dump */
+      prev[i] = (row || (i & 1)) ? ' ' : str[i / 2];
+    put_cells(y + row, x, VtLogoCell[row], VT_LOGO_W, prev, attr);
   }
+}
+
+/* Seven-segment digits and '/', 2 cells each.  Returns the width drawn so
+ * callers can lay out around it; unknown chars are skipped. */
+int
+vt_num(int y, int x, const char *s, int attr)
+{
+  const char *p;
+  char prev[2];
+  int x0 = x;
+
+  for (; *s; s++) {
+    p = strchr(VT_NUM_STR, *s);
+    if (!p) continue;
+    prev[0] = *s;
+    prev[1] = ' ';
+    put_cells(y, x, VtNumCell[p - VT_NUM_STR], 2, prev, attr);
+    x += 2;
+  }
+  return x - x0;
+}
+
+/* one key cap, 2 cells; returns the width drawn (0 if the key has no cap) */
+int
+vt_keycap(int y, int x, int key, int attr)
+{
+  const char *p = key ? strchr(VT_KEY_STR, key) : NULL;
+  char prev[2];
+
+  if (!p) return 0;			/* strchr would find the terminator */
+  prev[0] = (char)key;
+  prev[1] = ' ';
+  put_cells(y, x, VtKeyCell[p - VT_KEY_STR], 2, prev, attr);
+  return 2;
 }
 
 /* ---- diff + emit ------------------------------------------------------------ */
