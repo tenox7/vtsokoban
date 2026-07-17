@@ -946,13 +946,13 @@ static void write_header(const char *out)
     emit_pairs(f, "VtKeyCell", KeyCell, NKEY);
     fputs("#endif /* VT_TILE_DATA */\n", f);
     fclose(f);
-    printf("wrote %s (%d of %d DRCS slots)\n", out, NCell, NSLOT);
+    printf("wrote %s\n", out);
 }
 
 int main(int argc, char **argv)
 {
     const char *out = NULL, *demo = NULL, *preview = NULL;
-    int i;
+    int i, ntile, nlogo, nnum;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
@@ -962,12 +962,18 @@ int main(int argc, char **argv)
     }
 
     /* Tiles first: they are the art the game cannot do without, so they get
-     * the low slots and stay put as the UI art around them changes. */
+     * the low slots.  A terminal that runs out of font RAM then drops the
+     * decoration from the end and still has a playable board. */
     build_tiles();
+    ntile = NCell;
     build_logo();
+    nlogo = NCell;
     build_nums();
+    nnum = NCell;
     build_keys();
     if (NCell > NSLOT) die("art needs more than 94 DRCS slots");
+    printf("art: %d of %d DRCS slots -- %d tiles, %d logo, %d counters, %d caps\n",
+           NCell, NSLOT, ntile, nlogo - ntile, nnum - nlogo, NCell - nnum);
 
     if (out) write_header(out);
     if (preview) write_preview(preview);
